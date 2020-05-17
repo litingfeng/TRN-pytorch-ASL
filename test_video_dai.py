@@ -1,7 +1,3 @@
-# test the pre-trained model on a single video
-# (working on it)
-# Bolei Zhou and Alex Andonian
-
 import os
 import re
 import cv2
@@ -9,8 +5,10 @@ import argparse
 import functools
 import subprocess
 import numpy as np
+import glob
 from PIL import Image
 import moviepy.editor as mpy
+from shutil import copyfile
 
 import torchvision
 import torch.nn.parallel
@@ -78,7 +76,7 @@ group.add_argument('--frame_folder', type=str, default=None)
 parser.add_argument('--modality', type=str, default='RGB',
                     choices=['RGB', 'Flow', 'RGBDiff'], )
 parser.add_argument('--dataset', type=str, default='moments',
-                    choices=['something', 'jester', 'moments', 'somethingv2', 'rachel'])
+                    choices=['something', 'jester', 'moments', 'somethingv2', 'rachel', 'dai'])
 parser.add_argument('--rendered_output', type=str, default=None)
 parser.add_argument('--arch', type=str, default="InceptionV3")
 parser.add_argument('--input_size', type=int, default=224)
@@ -90,7 +88,7 @@ parser.add_argument('--weights', type=str)
 args = parser.parse_args()
 
 # Get dataset categories.
-categories_file = '{}/category.txt'.format(args.dataset)
+categories_file = '{}/category_label_20.txt'.format(args.dataset)
 categories = [line.rstrip() for line in open(categories_file, 'r').readlines()]
 num_class = len(categories)
 
@@ -121,32 +119,71 @@ transform = torchvision.transforms.Compose([
     transforms.GroupNormalize(net.input_mean, net.input_std),
 ])
 
+val_list = 'dai/val_videofolder_20.txt'
+tmp = [x.strip().split(' ') for x in open(val_list)]
+tmp = [item for item in tmp if int(item[1])>=3]
+correct = 0
+count  = 0
+correct_class = [0]*num_class
+count_class = [0]*num_class
+save_dir = '/dresden/gpu2/tl6012/data/ASL/isolate_mistakes'
+for c in categories:
+    os.makedirs(os.path.join(save_dir,c), exist_ok=True)
 # Obtain video frames
-if args.frame_folder is not None:
-    print('Loading frames in {}'.format(args.frame_folder))
-    import glob
+for frame_dir, _, label in tmp:
+    frame_dir = os.path.join(args.frame_folder, frame_dir)
+
     # Here, make sure after sorting the frame paths have the correct temporal order
-    frame_paths = sorted(glob.glob(os.path.join(args.frame_folder, '*.jpg')))
+    frame_paths = sorted(glob.glob(frame_dir+'/*.png'))
     frames = load_frames(frame_paths, num_frames=3)
-else:
-    print('Extracting frames using ffmpeg...')
-    frames = extract_frames(args.video_file, args.test_segments)
 
+    # Make video prediction.
+    data = transform(frames)
+    input = data.view(-1, 3, data.size(1), data.size(2)).unsqueeze(0).cuda()
 
-# Make video prediction.
-data = transform(frames)
-input = data.view(-1, 3, data.size(1), data.size(2)).unsqueeze(0).cuda()
+    try:
+        with torch.no_grad():
 
-with torch.no_grad():
-    logits = net(input)
-    h_x = torch.mean(F.softmax(logits, 1), dim=0).data
-    probs, idx = h_x.sort(0, True)
+            logits = net(input)
 
-# Output the prediction.
-video_name = args.frame_folder if args.frame_folder is not None else args.video_file
-print('RESULT ON ' + video_name)
-for i in range(0, 4):
-    print('{:.3f} -> {}'.format(probs[i], categories[idx[i]]))
+            h_x = torch.mean(F.softmax(logits, 1), dim=0).data
+            probs, idx = h_x.sort(0, True)
+            val ,inds = torch.max(h_x, 0)
+            count += 1
+    except:
+        continue
+
+    # Output the prediction.
+    if inds != int(label):
+        # print('WRONG!!!!!!')
+        # print('input ', input.size())
+        # print('logits ', logits.size())
+        # print('hs=x ', h_x)
+        # print('probs ', probs)
+        # print('inds ', inds, '\n label ', label)
+        # print('soft ', F.softmax(logits, 1).size())
+        print('Loading frames in {}'.format(frame_dir))
+        video_name = args.frame_folder if args.frame_folder is not None else args.video_file
+        print('RESULT ON ' + video_name)
+        for i in range(0, num_class):
+            print('{:.3f} -> {}'.format(probs[i], categories[idx[i]]))
+        count_class[int(label)] += 1
+
+        dst = os.path.join(save_dir, categories[inds.item()],
+                           frame_dir.split('/')[-2]+'_'+frame_dir.split('/')[-1])
+        print('dst ', dst)
+        if not os.path.islink(dst):
+            os.symlink(frame_dir, dst)
+        #exit()
+
+    else:
+        correct += 1
+        correct_class[int(label)] += 1
+        count_class[int(label)] += 1
+    #pred = torch.
+
+print('acc ', correct / count, correct, count)
+print('acc each class ', correct_class,'\n', count_class, '\n', np.array(correct_class)/np.array(count_class))
 
 # Render output frames with prediction text.
 if args.rendered_output is not None:

@@ -4,7 +4,7 @@ import torchvision
 import torchvision.datasets as datasets
 
 
-ROOT_DATASET = 'video_datasets'
+ROOT_DATASET = './'
 
 
 def return_something(modality):
@@ -26,6 +26,41 @@ def return_something(modality):
         os.exit()
     return filename_categories, filename_imglist_train, filename_imglist_val, root_data, prefix
 
+def return_rachel(modality, hand):
+    filename_categories = 'rachel/category.txt'
+    if modality == 'RGB':
+        root_data = '/dresden/gpu2/tl6012/data/ASL/Rachel_lexical'
+        filename_imglist_train = 'rachel/train_videofolder.txt'
+        filename_imglist_val = 'rachel/val_videofolder.txt'
+        prefix = 'frame{:d}.jpg'
+    elif modality == 'Flow':
+        root_data = '/dresden/gpu2/tl6012/data/ASL/Rachel_lexical_of'
+        #root_data = '/mnt/localssd1/bzhou/something/flow'
+        filename_imglist_train = 'rachel/train_videofolder.txt'
+        filename_imglist_val = 'rachel/val_videofolder.txt'
+        prefix = 'frame{:d}.jpg'
+    else:
+        print('no such modality:' + modality)
+        os.exit()
+    return filename_categories, filename_imglist_train, filename_imglist_val, root_data, prefix
+
+def return_dai(modality):
+    filename_categories = 'dai/category_label_20.txt'
+    if modality == 'RGB':
+        root_data = '/dresden/gpu2/tl6012/data/ASL/isolated_signs'
+        filename_imglist_train = 'dai/train_videofolder_20_hand.txt'
+        filename_imglist_val = 'dai/val_videofolder_20_hand.txt'
+        prefix = '{:d}.png'
+    elif modality == 'Flow': #TODO
+        root_data = '/dresden/gpu2/tl6012/data/ASL/isolated_signs_of'
+        #root_data = '/mnt/localssd1/bzhou/something/flow'
+        filename_imglist_train = 'dai/train_videofolder_20_hand.txt'
+        filename_imglist_val = 'dai/val_videofolder_20_hand.txt'
+        prefix = 'frame{:d}.jpg'
+    else:
+        print('no such modality:' + modality)
+        os.exit()
+    return filename_categories, filename_imglist_train, filename_imglist_val, root_data, prefix
 
 def return_somethingv2(modality):
     filename_categories = 'something/v2/category.txt'
@@ -101,7 +136,7 @@ def return_moments(modality):
 
 def return_dataset(dataset, modality):
     dict_single = {'jester': return_jester, 'something': return_something, 'somethingv2': return_somethingv2,
-                   'charades': return_charades, 'moments': return_moments}
+                   'charades': return_charades, 'moments': return_moments, 'rachel': return_rachel, 'dai': return_dai}
     if dataset in dict_single:
         file_categories, file_imglist_train, file_imglist_val, root_data, prefix = dict_single[dataset](modality)
     else:

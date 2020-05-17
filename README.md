@@ -1,126 +1,120 @@
 # Temporal Relation Networks
-**NEW(April 20, 2020)**: Check out our recent CVPR'20 work [Temporal Pyramid Networks (TPN) for action recognition](https://github.com/decisionforce/TPN), which outperforms TRN with a large margin and achieves close to SOTA results on many video benchmarks with RGB stream only. Bonus: bolei_juggling_v2.mp4 is attached in that repo!  
-
-We release the code of the [Temporal Relation Networks](http://relation.csail.mit.edu/), built on top of the [TSN-pytorch codebase](https://github.com/yjxiong/temporal-segment-networks).
-
-**NEW (July 29, 2018)**: This work is accepted to ECCV'18, check the [paper](https://arxiv.org/pdf/1711.08496.pdf) for the latest result. We also release the state of the art model trained on the Something-Something V2, see following instruction.
+**Introduction**: This repository is to apply TRN on [ASLLRP](http://dev1.cs.rutgers.edu:3000/dai/s/dai) dataset. The goal is to recognize sign labels, limited in lexical signs. In addition to TRN framework, keypoint detection, hand detection and left and right hand recognition is also included. 
 
 **Note**: always use `git clone --recursive https://github.com/metalbubble/TRN-pytorch` to clone this project
 Otherwise you will not be able to use the inception series CNN architecture.
 
 ![framework](http://relation.csail.mit.edu/framework_trn.png)
-
+### Requirements
+- PyTorch 1.3
+- [Weights & Biases](https://www.wandb.com/)
+- [Detectron2](https://github.com/facebookresearch/detectron2)
 ### Data preparation
-Download the [something-something dataset](https://www.twentybn.com/datasets/something-something/v1) or [jester dataset](https://www.twentybn.com/datasets/something-something) or [charades dataset](http://allenai.org/plato/charades/). Decompress them into some folder. Use [process_dataset.py](process_dataset.py) to generate the index files for train, val, and test split. Finally properly set up the train, validation, and category meta files in [datasets_video.py](datasets_video.py).
+#### Raw RGB image 
+1. Extract frames.
+```
+python extract_frame.py
+```
+2. Cut videos to utterance clips. 
+```bash
+python cut_video_to_clip.py
+```
+3. Delete blank frames.
+```
+python delete_unvalid_frame.py
+```
+4. Generate vocabulary and handshape list.
+```
+python generate_vocabulary.py
+```
+5. Parse annotation xml file and generate json file for each utterance video. Note: you can also include handshape annotation in this step, while I do so in `process_dataset_dai_hand.py`
+```
+python parse_sign.py
+```
+6. Cut the utterance videos into sign videos, and reorganize them according to the label. Note: since the label name migh include '/', it's necessary to replace '/' with 'or'.
+```
+python GenerateClassificationFolders.py
+```
+7. Generate category list and train/test list. Each row in train/test list is `[video_id, num_frames, class_idx]`.
+```
+python process_dataset_dai.py
+```
+8. Add function `return_dai` in dataset_video.py
 
-For [Something-Something-V2](https://www.twentybn.com/datasets/something-something), we provide a utilty script [extract_frames.py](https://github.com/metalbubble/TRN-pytorch/blob/master/extract_frames.py) for converting the downloaded `.webm` videos into directories containing extracted frames. Additionally, the corresponding optic flow images can be downloaded from [here](http://relation.csail.mit.edu/data/20bn-something-something-v2-flow.tar.gz).
+#### Optical flow image
+To compute optical flow image of each frame, run `python extract_of.py`
 
+
+#### Hand detection
+
+1. Pretrain on Egohands dataset. 
+```
+python Hand/train_detectron2_ego.py
+```
+2. Finetune on my annotated images from ASLLRP dataset
+```
+python Hand/findtune_asl_detectron2.py
+```
+#### Body keypoint detection
+```
+python Hand/train_detectron2_keypoint.py
+```
+#### Left right hand recognition
+Simply associate left right wrist keypoint with detected bounding boxes. Save in root/dai_lexical_handbox, each file is the bounding boxes in [left, right] order.
+```
+python Hand/classify_leftright_asl_detectron2.py
+```
+Then we are able to generate train/test list in which each row is  `[video_id, num_frames, class_idx, right_start_hs, left_start_hs, right_end_hs, left_end_hs]`.
+```
+python process_dataset_dai_hand.py
+```
 ### Code
 
 Core code to implement the Temporal Relation Network module is [TRNmodule](TRNmodule.py). It is plug-and-play on top of the TSN.
 
 ### Training and Testing
 
-* The command to train single scale TRN
+* The command to train single scale TRN using full frame. To train on hand image, use `main-hand.py`. To jointly train, use `main-handjoint.py`.
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 python main.py something RGB \
+CUDA_VISIBLE_DEVICES=0 python main.py \
+                     --dataset dai --modality RGB \
                      --arch BNInception --num_segments 3 \
-                     --consensus_type TRN --batch-size 64
+                     --consensus_type TRN --batch_size 64 
 ```
 
 * The command to train multi-scale TRN
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 python main.py something RGB \
-                     --arch BNInception --num_segments 8 \
-                     --consensus_type TRNmultiscale --batch-size 64
+CUDA_VISIBLE_DEVICES=0 python main.py \
+                     --dataset dai --modality RGB \
+                     --arch BNInception --num_segments 3 \
+                     --consensus_type TRNmultiscale --batch_size 64 
 ```
 
 * The command to test the single scale TRN
 
 ```bash
-python test_models.py something RGB model/TRN_something_RGB_BNInception_TRN_segment3_best.pth.tar \
-   --arch BNInception --crop_fusion_type TRN --test_segments 3
+python test_video_dai.py \
+       --frame_folder $FRAME_FOLDER \
+       --test_segments 3 \
+       --consensus_type TRN \
+       --weight $WEIGHT_PATH \
+       --arch BNInception \
+       --dataset dai
 ```
 
-* The command to test the multi-scale TRN
+* The command to test the single scale 2-stream TRN
 
 ```bash
-python test_models.py something RGB model/TRN_something_RGB_BNInception_TRNmultiscale_segment8_best.pth.tar \
-   --arch BNInception --crop_fusion_type TRNmultiscale --test_segments 8
+python test-dai-2stream.py \
+        --dataset rachel --modality RGB \
+        --arch BNInception --num_segments 3 \
+        --resume $RGB_WEIGHTPATH \
+        --resume_of $OF_WEIGHTPATH \
+        --consensus_type TRN --batch_size 64 \
+        --data_length 3 \
+        --evaluate
 ```
-
-### Pretrained models and demo code
-
-* Download pretrained models on [Something-Something](https://20bn.com/datasets/something-something/v1), [Something-Something-V2](https://www.twentybn.com/datasets/something-something), [Jester](https://www.twentybn.com/datasets/jester), and [Moments in Time](http://moments.csail.mit.edu/)
-
-```bash
-cd pretrain
-./download_models.sh
-```
-
-* Download sample video and extracted frames. There will be mp4 video file and a folder containing the RGB frames for that video.
-
-```bash
-cd sample_data
-./download_sample_data.sh
-```
-
-The sample video is the following
-
-![result](http://relation.csail.mit.edu/data/bolei_juggling.gif)
-
-* Test pretrained model trained on Something-Something-V2
-
-```bash
-python test_video.py --arch BNInception --dataset somethingv2 \
-    --weights pretrain/TRN_somethingv2_RGB_BNInception_TRNmultiscale_segment8_best.pth.tar \
-    --frame_folder sample_data/bolei_juggling
-
-RESULT ON sample_data/bolei_juggling
-0.500 -> Throwing something in the air and catching it
-0.141 -> Throwing something in the air and letting it fall
-0.072 -> Pretending to throw something
-0.024 -> Throwing something
-0.024 -> Hitting something with something
-
-```
-
-
-* Test pretrained model trained on [Moments in Time](http://moments.csail.mit.edu/)
-
-```bash
-python test_video.py --arch InceptionV3 --dataset moments \
-    --weights pretrain/TRN_moments_RGB_InceptionV3_TRNmultiscale_segment8_best.pth.tar \
-    --frame_folder sample_data/bolei_juggling
-
-RESULT ON sample_data/bolei_juggling
-
-0.982 -> juggling
-0.003 -> flipping
-0.003 -> spinning
-0.003 -> smoking
-0.002 -> whistling
-```
-
-* Test pretrained model on mp4 video file
-
-```bash
-python test_video.py --arch InceptionV3 --dataset moments \
-    --weights pretrain/TRN_moments_RGB_InceptionV3_TRNmultiscale_segment8_best.pth.tar \
-    --video_file sample_data/bolei_juggling.mp4 --rendered_output sample_data/predicted_video.mp4
-```
-
-The command above uses `ffmpeg` to extract frames from the supplied video `--video_file` and optionally generates a new video `--rendered_output` from the frames used to make the prediction with the predicted category in the top-left corner.
-
-* Gesture recognition web-cam [demo](https://youtu.be/6PAvFzV4Yfo/) script
-python fps_dem_trn.py
-
-### TODO
-
-* TODO: Web-cam demo script
-* TODO: Visualization script
-* TODO: class-aware data augmentation
 
 ### Reference:
 B. Zhou, A. Andonian, and A. Torralba. Temporal Relational Reasoning in Videos. European Conference on Computer Vision (ECCV), 2018. [PDF](https://arxiv.org/pdf/1711.08496.pdf)
@@ -133,5 +127,3 @@ B. Zhou, A. Andonian, and A. Torralba. Temporal Relational Reasoning in Videos. 
 }
 ```
 
-### Acknowledgement
-Our temporal relation network is plug-and-play on top of the [TSN-Pytorch](https://github.com/yjxiong/temporal-segment-networks), but it could be extended to other network architectures easily. We thank Yuanjun Xiong for releasing TSN-Pytorch codebase. Something-something dataset and Jester dataset are from [TwentyBN](https://www.twentybn.com/), we really appreciate their effort to build such nice video datasets. Please refer to [their dataset website](https://www.twentybn.com/datasets/something-something) for the proper usage of the data.

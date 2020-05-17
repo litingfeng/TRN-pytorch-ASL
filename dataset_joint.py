@@ -68,12 +68,6 @@ class TSNDataSet(data.Dataset):
 
     def _load_image_hand(self, directory, base_idx, numframes):
 
-        hand_imgs = []
-        # print('boxes path ', os.path.join(self.handbox_dir, directory,
-        #                      self.handbox_tmpl.format(base_idx)), '\n',
-        #                      os.path.join(self.handbox_dir, directory,
-        #                      self.handbox_tmpl.format(base_idx+numframes-1)))
-
         # boxes are in left right order, or just one box
         boxes = [np.load(os.path.join(self.handbox_dir, directory,
                               self.handbox_tmpl.format(i))) for i in [base_idx, base_idx+numframes-1]]
@@ -97,19 +91,6 @@ class TSNDataSet(data.Dataset):
         # change order to start_left, end_left, start_right, end_right
         new_frames = [new_frames[0], new_frames[2], new_frames[1], new_frames[3]]
 
-        # concatenate horizontally
-        # new_frames = [ frames[0].crop(box=b).resize((120,120)) if i < 2 else frames[1].crop(b).resize((120,120))
-        #                for i,b in enumerate(boxes)]
-        # new_frames = [ self._get_concat_h(new_frames[i*2], new_frames[i*2+1]) for i in range(2)]
-
-
-
-        # new_frames[0].save('0.jpg')
-        # new_frames[1].save('1.jpg')
-        # new_frames[2].save('2.jpg')
-        # new_frames[3].save('3.jpg')
-
-        #exit()
         return new_frames
 
 
@@ -146,17 +127,11 @@ class TSNDataSet(data.Dataset):
     def _parse_list(self):
         # check the frame number is large >3:
         # usualy it is [video_id, num_frames, class_idx, right_start_hs, left_start_hs, right_end_hs, left_end_hs]
-
         tmp = [x.strip().split(' ') for x in open(self.list_file)]
         if 'Flow' in self.modality:
             tmp = [[x[0], str(int(x[1])-1), x[2]] for x in tmp]
         tmp = [item for item in tmp if int(item[1])>=3]
 
-        # cate_list = [ item[0].split('/')[0] for item in tmp]
-        # print('cate list ', cate_list[0])
-        # cate_num = [cate_list.count(categories[i]) for i in range(4)]
-        # print(cate_num)
-        # exit()
         self.video_list = [VideoRecord(item) for item in tmp]
         self.labels     = [int(item[2]) for item in tmp]
         print('video number:%d'%(len(self.video_list)))
@@ -240,23 +215,22 @@ class TSNDataSet(data.Dataset):
             exit()
 
         p_tmp = int(record.path.split('/')[1].split('_')[1])
-        if not self.hand:
-            for seg_ind in indices: # indices starts from 1
-                p = int(seg_ind)-1
-                for i in range(self.new_length):
-                    seg_imgs = self._load_image(record.path, p, p_tmp)
-                    images.extend(seg_imgs)
-                    if p+1 < record.num_frames:
-                        p += 1
-        else:
-            images = self._load_image_hand(record.path, p_tmp, record.num_frames)
+        for seg_ind in indices: # indices starts from 1
+            p = int(seg_ind)-1
+
+            for i in range(self.new_length):
+                seg_imgs = self._load_image(record.path, p, p_tmp)
+                images.extend(seg_imgs)
+                if p+1 < record.num_frames:
+                    p += 1
+
+        images_hand = self._load_image_hand(record.path, p_tmp, record.num_frames)
 
         process_data = self.transform(images)
+        process_data_hand = self.transform(images_hand)
 
-        if self.hand:
-            return process_data, np.array(record.handshapes)
+        return process_data, record.label, process_data_hand, np.array(record.handshapes)
 
-        return process_data, record.label
 
     def __len__(self):
         return len(self.video_list)

@@ -3,15 +3,169 @@ from torch import nn
 from ops.basic_ops import ConsensusModule, Identity
 from transforms import *
 from torch.nn.init import normal, constant
+import torch.nn.functional as F
 
 import TRNmodule
+
+HAND_CLASS = 85
+
+class JointTSN(nn.Module):
+
+    def __init__(self, num_class, num_segments, modality,
+                 base_model='resnet101', new_length=None,
+                 consensus_type='avg', before_softmax=True,
+                 dropout=0.8,img_feature_dim=256,
+                 crop_num=1, partial_bn=True, print_spec=True,
+                 siamese=False):
+        super(JointTSN, self).__init__()
+
+        self.model = TSN(num_class, num_segments, modality,
+                     base_model=base_model, new_length=new_length,
+                     consensus_type=consensus_type, before_softmax=before_softmax,
+                     dropout=dropout,img_feature_dim=img_feature_dim,
+                     crop_num=crop_num, partial_bn=partial_bn, print_spec=print_spec,
+                     siamese=siamese)
+
+        self.model_hand = TSN(num_class, 2, modality,
+                         base_model=base_model, new_length=new_length,
+                         consensus_type=consensus_type, before_softmax=before_softmax,
+                         dropout=dropout, img_feature_dim=img_feature_dim,
+                         crop_num=crop_num, partial_bn=partial_bn, print_spec=print_spec,
+                         siamese=siamese)
+
+        self.consensus_handshape = TRNmodule.return_TRN(consensus_type, img_feature_dim, 2, HAND_CLASS*2)
+        self.agg_classifier = nn.Sequential(
+            nn.ReLU(),
+            nn.Linear(2*num_class, num_class)
+        )
+        self.pool = torch.nn.AvgPool1d(kernel_size=2)
+
+
+    def forward(self, input, input_hand):
+
+        output = self.model(input)
+
+        # sample_len = (3 if self.model.modality == "RGB" else 2) * self.model.new_length
+        #
+        # if self.model.modality == 'RGBDiff':
+        #     sample_len = 3 * self.model.new_length
+        #     input = self.model._get_diff(input)
+        #
+        # # print('sample ', sample_len, 'mod '. self.modality, self.new_length)
+        # base_out = self.model.base_model(input.view((-1, sample_len) + input.size()[-2:]))  # (bs*#seg, 3, 224, 224)
+        # # print('base_out ', base_out.shape)
+        #
+        # if self.model.dropout > 0:
+        #     base_out = self.model.new_fc(base_out)
+        # print('base_out1 ', base_out.shape)
+        #
+        # if not self.model.before_softmax:
+        #     base_out = self.model.softmax(base_out)
+        # print('base_out2 ', base_out.shape)
+
+        # repeat for hand
+        sample_len = (3 if self.model_hand.modality == "RGB" else 2) * self.model_hand.new_length
+
+        if self.model_hand.modality == 'RGBDiff':
+            sample_len = 3 * self.model_hand.new_length
+            input_hand = self.model_hand._get_diff(input_hand)
+
+        base_out_hand = self.model_hand.base_model(input_hand.view((-1, sample_len) + input_hand.size()[-2:]))  # (bs*#seg, 3, 224, 224)
+
+        if self.model_hand.dropout > 0:
+            base_out_hand = self.model_hand.new_fc(base_out_hand)
+
+        if not self.model_hand.before_softmax:
+            base_out_hand = self.model_hand.softmax(base_out_hand) # (bs*4, 256)
+
+        base_out_hand = base_out_hand.view((-1, 2) + base_out_hand.size()[1:])  # (bs*2, #seg, 256)
+        output2 = self.model_hand.consensus(base_out_hand)  # (bs*2, #num_class)
+        output_handshape = self.consensus_handshape(base_out_hand)  # (bs*2, HANDCLASS*2)
+
+        output2 = output2.transpose(1, 0).reshape(output2.size(1), 1, -1)
+        output2 = self.pool(output2).squeeze().transpose(1, 0)
+
+        output = torch.cat((output, output2), 1)
+        output = self.agg_classifier(output)
+
+        return output.squeeze(1), output_handshape.squeeze(1)
+
+class HandTSN(nn.Module):
+
+    def __init__(self, num_class, num_segments, modality,
+                 base_model='resnet101', new_length=None,
+                 consensus_type='avg', before_softmax=True,
+                 dropout=0.8,img_feature_dim=256,
+                 crop_num=1, partial_bn=True, print_spec=True,
+                 siamese=False):
+        super(HandTSN, self).__init__()
+
+        self.model_hand = TSN(num_class, 2, modality,
+                         base_model=base_model, new_length=new_length,
+                         consensus_type=consensus_type, before_softmax=before_softmax,
+                         dropout=dropout, img_feature_dim=img_feature_dim,
+                         crop_num=crop_num, partial_bn=partial_bn, print_spec=print_spec,
+                         siamese=siamese)
+
+        self.consensus_handshape = TRNmodule.return_TRN(consensus_type, img_feature_dim, 2, HAND_CLASS*2)
+        self.pool = torch.nn.AvgPool1d(kernel_size=2)
+
+
+    def forward(self, input_hand):
+
+        # sample_len = (3 if self.model.modality == "RGB" else 2) * self.model.new_length
+        #
+        # if self.model.modality == 'RGBDiff':
+        #     sample_len = 3 * self.model.new_length
+        #     input = self.model._get_diff(input)
+        #
+        # # print('sample ', sample_len, 'mod '. self.modality, self.new_length)
+        # base_out = self.model.base_model(input.view((-1, sample_len) + input.size()[-2:]))  # (bs*#seg, 3, 224, 224)
+        # # print('base_out ', base_out.shape)
+        #
+        # if self.model.dropout > 0:
+        #     base_out = self.model.new_fc(base_out)
+        # print('base_out1 ', base_out.shape)
+        #
+        # if not self.model.before_softmax:
+        #     base_out = self.model.softmax(base_out)
+        # print('base_out2 ', base_out.shape)
+
+        # repeat for hand
+        sample_len = (3 if self.model_hand.modality == "RGB" else 2) * self.model_hand.new_length
+
+        if self.model_hand.modality == 'RGBDiff':
+            sample_len = 3 * self.model_hand.new_length
+            input_hand = self.model_hand._get_diff(input_hand)
+
+        base_out_hand = self.model_hand.base_model(input_hand.view((-1, sample_len) + input_hand.size()[-2:]))  # (bs*#seg, 3, 224, 224)
+
+        if self.model_hand.dropout > 0:
+            base_out_hand = self.model_hand.new_fc(base_out_hand)
+
+        if not self.model_hand.before_softmax:
+            base_out_hand = self.model_hand.softmax(base_out_hand) # (bs*4, 256)
+
+        base_out_hand = base_out_hand.view((-1, 2) + base_out_hand.size()[1:])  # (bs*2, #seg, 256)
+        output2 = self.model_hand.consensus(base_out_hand)  # (bs*2, #num_class)
+        output_handshape = self.consensus_handshape(base_out_hand)  # (bs*2, HANDCLASS*2)
+
+        output2 = output2.transpose(1, 0).reshape(output2.size(1), 1, -1)
+        output2 = self.pool(output2).squeeze().transpose(1, 0)
+
+
+        return output2.squeeze(1), output_handshape.squeeze(1)
+
+
+
 
 class TSN(nn.Module):
     def __init__(self, num_class, num_segments, modality,
                  base_model='resnet101', new_length=None,
                  consensus_type='avg', before_softmax=True,
                  dropout=0.8,img_feature_dim=256,
-                 crop_num=1, partial_bn=True, print_spec=True):
+                 crop_num=1, partial_bn=True, print_spec=True,
+                 siamese=False, hand=False):
         super(TSN, self).__init__()
         self.modality = modality
         self.num_segments = num_segments
@@ -20,14 +174,20 @@ class TSN(nn.Module):
         self.dropout = dropout
         self.crop_num = crop_num
         self.consensus_type = consensus_type
+        self.siamese = siamese
+        self.hand = hand
         self.img_feature_dim = img_feature_dim  # the dimension of the CNN feature to represent each frame
         if not before_softmax and consensus_type != 'avg':
             raise ValueError("Only avg consensus can be used after Softmax")
 
         if new_length is None:
-            self.new_length = 1 if modality == "RGB" else 5
+            self.new_length = 1 if modality == "RGB" else 3
         else:
             self.new_length = new_length
+
+        if self.modality == 'RGB':
+            self.new_length = 1
+
         if print_spec == True:
             print(("""
     Initializing TSN with base model: {}.
@@ -41,10 +201,9 @@ class TSN(nn.Module):
             """.format(base_model, self.modality, self.num_segments, self.new_length, consensus_type, self.dropout, self.img_feature_dim)))
 
         self._prepare_base_model(base_model)
-
         feature_dim = self._prepare_tsn(num_class)
 
-        if self.modality == 'Flow':
+        if self.modality == 'Flow': # TODO hand
             print("Converting the ImageNet model to a flow init model")
             self.base_model = self._construct_flow_model(self.base_model)
             print("Done. Flow model ready...")
@@ -61,6 +220,8 @@ class TSN(nn.Module):
         if not self.before_softmax:
             self.softmax = nn.Softmax()
 
+        if self.siamese:
+            self.cos = nn.CosineSimilarity(dim=1, eps=1e-6)
         self._enable_pbn = partial_bn
         if partial_bn:
             self.partialBN(True)
@@ -86,6 +247,7 @@ class TSN(nn.Module):
         else:
             normal(self.new_fc.weight, 0, std)
             constant(self.new_fc.bias, 0)
+
         return feature_dim
 
     def _prepare_base_model(self, base_model):
@@ -115,6 +277,7 @@ class TSN(nn.Module):
                 self.input_mean = [128]
             elif self.modality == 'RGBDiff':
                 self.input_mean = self.input_mean * (1 + self.new_length)
+
         elif base_model == 'InceptionV3':
             import model_zoo
             self.base_model = getattr(model_zoo, base_model)()
@@ -210,25 +373,39 @@ class TSN(nn.Module):
              'name': "BN scale/shift"},
         ]
 
-    def forward(self, input):
+    def forward_once(self, input):
         sample_len = (3 if self.modality == "RGB" else 2) * self.new_length
 
         if self.modality == 'RGBDiff':
             sample_len = 3 * self.new_length
             input = self._get_diff(input)
 
-        base_out = self.base_model(input.view((-1, sample_len) + input.size()[-2:]))
+        #print('sample ', sample_len, 'mod '. self.modality, self.new_length)
+        base_out = self.base_model(input.view((-1, sample_len) + input.size()[-2:])) # (bs*#seg, 3, 224, 224)
+        #print('base_out ', base_out.shape)
 
         if self.dropout > 0:
             base_out = self.new_fc(base_out)
+        #print('base_out1 ', base_out.shape)
 
         if not self.before_softmax:
             base_out = self.softmax(base_out)
+        #print('base_out2 ', base_out.shape)
         if self.reshape:
-            base_out = base_out.view((-1, self.num_segments) + base_out.size()[1:])
+            base_out = base_out.view((-1, self.num_segments) + base_out.size()[1:])  # (bs, #seg, 256)
+        #exit()
 
-        output = self.consensus(base_out)
+        output = self.consensus(base_out)  # (bs, #num_class)
         return output.squeeze(1)
+
+    def forward(self, input, input2=None):
+        output = self.forward_once(input)
+        if input2 is not None:
+            output2 = self.forward_once(input2)
+            output = self.cos(output, output2)
+
+        return output
+
 
     def _get_diff(self, input, keep_rgb=False):
         input_c = 3 if self.modality in ["RGB", "RGBDiff"] else 2
@@ -265,6 +442,7 @@ class TSN(nn.Module):
         new_conv = nn.Conv2d(2 * self.new_length, conv_layer.out_channels,
                              conv_layer.kernel_size, conv_layer.stride, conv_layer.padding,
                              bias=True if len(params) == 2 else False)
+
         new_conv.weight.data = new_kernels
         if len(params) == 2:
             new_conv.bias.data = params[1].data # add bias if neccessary
@@ -325,3 +503,21 @@ class TSN(nn.Module):
         elif self.modality == 'RGBDiff':
             return torchvision.transforms.Compose([GroupMultiScaleCrop(self.input_size, [1, .875, .75]),
                                                    GroupRandomHorizontalFlip(is_flow=False)])
+
+class ContrastiveLoss(torch.nn.Module):
+    """
+    Contrastive loss function.
+    Based on: http://yann.lecun.com/exdb/publis/pdf/hadsell-chopra-lecun-06.pdf
+    """
+
+    def __init__(self, margin=2.0):
+        super(ContrastiveLoss, self).__init__()
+        self.margin = margin
+
+    def forward(self, output1, output2, label):
+        euclidean_distance = F.pairwise_distance(output1, output2, keepdim = True)
+        loss_contrastive = torch.mean((1-label) * torch.pow(euclidean_distance, 2) +
+                                      (label) * torch.pow(torch.clamp(self.margin - euclidean_distance, min=0.0), 2))
+
+
+        return loss_contrastive

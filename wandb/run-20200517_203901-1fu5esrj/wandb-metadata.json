@@ -1,0 +1,40 @@
+{
+    "root": "/ajax/users/tl601/projects/TRN-pytorch-ASL",
+    "program": "main.py",
+    "git": {
+        "remote": "https://github.com/litingfeng/TRN-pytorch-ASL.git",
+        "commit": "c0ec85241c0e48d6ef61007b6791022f6349e63c"
+    },
+    "email": null,
+    "startedAt": "2020-05-17T20:39:01.533518",
+    "host": "mykonos.cs.rutgers.edu",
+    "username": "tl601",
+    "executable": "/ajax/users/tl601/anaconda3/envs/py36pytorch14/bin/python",
+    "os": "Linux-4.15.0-91-generic-x86_64-with-debian-buster-sid",
+    "python": "3.6.10",
+    "gpu": "Quadro RTX 8000",
+    "gpu_count": 8,
+    "cpu_count": 48,
+    "cuda": "10.2.89",
+    "args": [
+        "--dataset",
+        "dai",
+        "--modality",
+        "RGB",
+        "--arch",
+        "BNInception",
+        "--num_segments",
+        "3",
+        "--consensus_type",
+        "TRN",
+        "--batch_size",
+        "64"
+    ],
+    "state": "failed",
+    "jobType": null,
+    "mode": "run",
+    "name": "debug",
+    "project": "trn-dai",
+    "heartbeatAt": "2020-05-17T20:39:05.218460",
+    "exitcode": 1
+}

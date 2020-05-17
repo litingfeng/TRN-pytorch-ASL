@@ -3,6 +3,7 @@ import os
 import time
 import shutil
 import torch
+import torch.nn as nn
 import torchvision
 import torch.nn.parallel
 import torch.backends.cudnn as cudnn
@@ -14,118 +15,58 @@ from models import TSN, ContrastiveLoss
 from transforms import *
 from opts import parser
 import datasets_video
-from class_balanced_loss import CB_loss
 
 import wandb
-wandb.init(project="trn-dai")
+wandb.init(project="trn")
 
 
 best_prec1 = 0
 best_loss  = 10
-HAND_CLASS = 85
-
-def initialize_model(num_class, args):
-    model = TSN(num_class, args.num_segments, args.modality,
-                base_model=args.arch,
-                new_length=args.data_length,
-                consensus_type=args.consensus_type,
-                dropout=args.dropout,
-                img_feature_dim=args.img_feature_dim,
-                partial_bn=not args.no_partialbn,
-                siamese=args.siamese,
-                hand=args.hand)
-
-    crop_size = model.crop_size
-    scale_size = model.scale_size
-    input_mean = model.input_mean
-    input_std = model.input_std
-    policies = model.get_optim_policies()
-    train_augmentation = model.get_augmentation()
-
-    model = torch.nn.DataParallel(model, device_ids=args.gpus).cuda()
-
-    return model,crop_size, scale_size, input_mean, \
-            input_std, policies, train_augmentation
-
-def initialize_dataloader(args, crop_size, scale_size, input_mean,
-                            input_std, train_augmentation, prefix):
-    if args.modality != 'RGBDiff':
-        normalize = GroupNormalize(input_mean, input_std)
-    else:
-        normalize = IdentityTransform()
-
-    if args.modality == 'RGB':
-        data_length = 1
-    elif args.modality in ['Flow', 'RGBDiff']:
-        data_length = args.data_length # set 3 for rachel
-
-    trainset = TSNDataSet(args.root_path, args.train_list, num_segments=args.num_segments,
-                          new_length=data_length,
-                          modality=args.modality,
-                          image_tmpl=prefix,
-                          transform=torchvision.transforms.Compose([
-                              train_augmentation,
-                              Stack(roll=(args.arch in ['BNInception', 'InceptionV3'])),
-                              ToTorchFormatTensor(div=(args.arch not in ['BNInception', 'InceptionV3'])),
-                              normalize,
-                          ]), siamese=args.siamese, hand=args.hand)
-
-    # weighted sampling
-    # class_sample_counts = [1022, 841, 472, 70]
-    # compute weight for all the samples in the dataset
-    # samples_weights contain the probability for each example in dataset to be sampled
-    # class_weights = 1. / torch.Tensor(class_sample_counts)
-    # train_samples_weight = [class_weights[class_id] for class_id in trainset.labels]
-    # train_sampler = torch.utils.data.sampler.WeightedRandomSampler(train_samples_weight, len(trainset))
-    # train_loader = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size, sampler=train_sampler,
-    #                                           num_workers=args.workers, pin_memory=True)
-
-    train_loader = torch.utils.data.DataLoader(
-        trainset,
-        batch_size=args.batch_size, shuffle=True,
-        num_workers=args.workers, pin_memory=True)
-
-    val_loader = torch.utils.data.DataLoader(
-        TSNDataSet(args.root_path, args.val_list, num_segments=args.num_segments,
-                   new_length=data_length,
-                   modality=args.modality,
-                   image_tmpl=prefix,
-                   random_shift=False,
-                   transform=torchvision.transforms.Compose([
-                       GroupScale(int(scale_size)),
-                       GroupCenterCrop(crop_size),
-                       Stack(roll=(args.arch in ['BNInception', 'InceptionV3'])),
-                       ToTorchFormatTensor(div=(args.arch not in ['BNInception', 'InceptionV3'])),
-                       normalize,
-                   ]), hand=args.hand),
-        batch_size=args.batch_size, shuffle=False,
-        num_workers=args.workers, pin_memory=True)
-
-    return train_loader, val_loader
-
 
 def main():
     global args, best_prec1
     args = parser.parse_args()
     check_rootfolders()
 
-    #os.environ['CUDA_VISIBLE_DEVICES'] = "1,2,3"
-
     categories, args.train_list, args.val_list, args.root_path, prefix = datasets_video.return_dataset(args.dataset, args.modality)
     num_class = len(categories)
-    if args.hand:
-        num_class = HAND_CLASS * 2 # the output is (bs, #class*2)
 
 
     args.store_name = '_'.join(['TRN', args.dataset, args.modality, args.arch, args.consensus_type, 'segment%d'% args.num_segments,
-                                'newL%d'% args.data_length, 'loss%s'% args.loss_type, 'bs%d' % args.batch_size])
+                                'bs%d' % args.batch_size])
     print('storing name: ' + args.store_name)
 
-    model,crop_size, scale_size, input_mean, \
-    input_std, policies, train_augmentation = initialize_model(num_class, args)
+    model = TSN(num_class, args.num_segments, 'RGB',
+                base_model=args.arch,
+                new_length=1,
+                consensus_type=args.consensus_type,
+                dropout=args.dropout,
+                img_feature_dim=args.img_feature_dim,
+                partial_bn=not args.no_partialbn,
+                siamese=args.siamese)
 
+    model_flow = TSN(num_class, args.num_segments, 'Flow',
+                base_model=args.arch,
+                new_length=2,
+                consensus_type=args.consensus_type,
+                dropout=args.dropout,
+                img_feature_dim=args.img_feature_dim,
+                partial_bn=not args.no_partialbn,
+                siamese=args.siamese)
 
-    wandb.watch(model)
+    crop_size = [model.crop_size, model_flow.crop_size]
+    scale_size = [model.scale_size, model_flow.scale_size]
+    input_mean = [model.input_mean, model_flow.input_mean]
+    input_std = [model.input_std, model_flow.input_std]
+    policies = [model.get_optim_policies(), model_flow.get_optim_policies()]
+    train_augmentation = [model.get_augmentation(), model_flow.get_augmentation()]
+
+    for group in policies[0]:
+        print(('group: {} has {} params, lr_mult: {}, decay_mult: {}'.format(
+            group['name'], len(group['params']), group['lr_mult'], group['decay_mult'])))
+    for group in policies[1]:
+        print(('group: {} has {} params, lr_mult: {}, decay_mult: {}'.format(
+            group['name'], len(group['params']), group['lr_mult'], group['decay_mult'])))
 
     if args.resume:
         if os.path.isfile(args.resume):
@@ -133,42 +74,113 @@ def main():
             checkpoint = torch.load(args.resume)
             args.start_epoch = checkpoint['epoch']
             best_prec1 = checkpoint['best_prec1']
-            model.load_state_dict(checkpoint['state_dict'])
+            base_dict = {'.'.join(k.split('.')[1:]): v for k, v in list(checkpoint['state_dict'].items())}
+            model.load_state_dict(base_dict)
             print(("=> loaded checkpoint '{}' (epoch {})"
                   .format(args.evaluate, checkpoint['epoch'])))
+            print('best prec ', best_prec1.item())
         else:
             print(("=> no checkpoint found at '{}'".format(args.resume)))
+
+        if os.path.isfile(args.resume_of):
+            print(("=> loading checkpoint '{}'".format(args.resume_of)))
+            checkpoint = torch.load(args.resume_of)
+            args.start_epoch = checkpoint['epoch']
+            best_prec1 = checkpoint['best_prec1']
+            base_dict = {'.'.join(k.split('.')[1:]): v for k, v in list(checkpoint['state_dict'].items())}
+            model_flow.load_state_dict(base_dict)
+            print(("=> loaded checkpoint '{}' (epoch {})"
+                  .format(args.evaluate, checkpoint['epoch'])))
+            print('best prec ', best_prec1.item())
+        else:
+            print(("=> no checkpoint found at '{}'".format(args.resume_of)))
+
+    model = torch.nn.DataParallel(model, device_ids=args.gpus).cuda()
+    model_flow = torch.nn.DataParallel(model_flow, device_ids=args.gpus).cuda()
+
+    wandb.watch(model)
 
     cudnn.benchmark = True
 
     # Data loading code
-    train_loader, val_loader = initialize_dataloader(args, crop_size, scale_size, input_mean,
-                                                    input_std, train_augmentation, prefix)
+    if args.modality != 'RGBDiff':
+        normalize = [GroupNormalize(input_mean[0], input_std[0]), GroupNormalize(input_mean[1], input_std[1])]
+    else:
+        normalize = IdentityTransform()
 
-    #wandb.init(project="trn")
+    # if args.modality == 'RGB':
+    #     data_length = 1
+    # elif args.modality in ['Flow', 'RGBDiff']:
+    #     data_length = args.data_length # set 3 for rachel
+
+    wandb.init(project="trn")
     wandb.config.update(args)
+
+    train_loader = torch.utils.data.DataLoader(
+        TSNDataSet(args.root_path, args.train_list, num_segments=args.num_segments,
+                   new_length=1,
+                   modality='RGB',
+                   image_tmpl=prefix,
+                   transform=torchvision.transforms.Compose([
+                       train_augmentation,
+                       Stack(roll=(args.arch in ['BNInception', 'InceptionV3'])),
+                       ToTorchFormatTensor(div=(args.arch not in ['BNInception', 'InceptionV3'])),
+                       normalize[0],
+                   ]), siamese=args.siamese),
+        batch_size=args.batch_size, shuffle=True,
+        num_workers=args.workers, pin_memory=True)
+
+    val_loader = torch.utils.data.DataLoader(
+        TSNDataSet('/dresden/gpu2/tl6012/data/ASL/Rachel_lexical/', args.val_list, num_segments=args.num_segments,
+                   new_length=1,
+                   modality='RGB',
+                   image_tmpl=prefix,
+                   random_shift=False,
+                   transform=torchvision.transforms.Compose([
+                       GroupScale(int(scale_size[0])),
+                       GroupCenterCrop(crop_size[0]),
+                       Stack(roll=(args.arch in ['BNInception','InceptionV3'])),
+                       ToTorchFormatTensor(div=(args.arch not in ['BNInception','InceptionV3'])),
+                       normalize[0],
+                   ])),
+        batch_size=args.batch_size, shuffle=False,
+        num_workers=args.workers, pin_memory=True)
+
+    val_loader_of = torch.utils.data.DataLoader(
+        TSNDataSet('/dresden/gpu2/tl6012/data/ASL/Rachel_lexical_of/', args.val_list, num_segments=args.num_segments,
+                   new_length=2,
+                   modality='Flow',
+                   image_tmpl=prefix,
+                   random_shift=False,
+                   transform=torchvision.transforms.Compose([
+                       GroupScale(int(scale_size[1])),
+                       GroupCenterCrop(crop_size[1]),
+                       Stack(roll=(args.arch in ['BNInception', 'InceptionV3'])),
+                       ToTorchFormatTensor(div=(args.arch not in ['BNInception', 'InceptionV3'])),
+                       normalize[1],
+                   ])),
+        batch_size=args.batch_size, shuffle=False,
+        num_workers=args.workers, pin_memory=True)
 
     # define loss function (criterion) and optimizer
     if args.loss_type == 'nll' and not args.siamese:
         criterion = torch.nn.CrossEntropyLoss().cuda()
-    elif args.loss_type == 'CB':
-        criterion = CB_loss
     elif args.siamese:
         criterion = torch.nn.CrossEntropyLoss().cuda() #ContrastiveLoss(margin=args.margin)
     else:
         raise ValueError("Unknown loss type")
 
-    for group in policies:
-        print(('group: {} has {} params, lr_mult: {}, decay_mult: {}'.format(
-            group['name'], len(group['params']), group['lr_mult'], group['decay_mult'])))
 
-    optimizer = torch.optim.SGD(policies,
+
+
+    optimizer = torch.optim.SGD(policies[0],
                                 args.lr,
                                 momentum=args.momentum,
                                 weight_decay=args.weight_decay)
 
     if args.evaluate:
-        validate(val_loader, model, criterion, 0)
+        prec = validate_2stream(val_loader, val_loader_of, model, model_flow, criterion, 0)
+        #validate(val_loader, model, criterion, 0)
         return
 
     log_training = open(os.path.join(args.root_log, '%s.csv' % args.store_name), 'w')
@@ -203,7 +215,7 @@ def main():
                 }, is_best)
 
         # Save model to wandb
-        #torch.save(model.state_dict(), os.path.join(wandb.run.dir, 'model.pt'))
+        torch.save(model.state_dict(), os.path.join(wandb.run.dir, 'model.pt'))
 
 
 def train(train_loader, model, criterion, optimizer, epoch, log):
@@ -228,15 +240,10 @@ def train(train_loader, model, criterion, optimizer, epoch, log):
         if args.siamese:
             input1, input2, target = data
         else:
-            input1, target = data # rgb(bs, #seg*3, 224,224), flow(bs, #seg*datalength*2, 224,224), 2 for flow_x&flow_y
-            if args.hand:
-                input1 = input1.view(-1, 6, input1.size(2), input1.size(3)) # each sample is a pair of start&end hand images
-                target = target.view(-1)
+            input1, target = data
 
         # print('input1 ', input1.shape, ' ', target.shape)
-        # print('target ', target.shape)
-        # break
-        # # continue
+        # continue
 
         data_time.update(time.time() - end)
 
@@ -250,10 +257,7 @@ def train(train_loader, model, criterion, optimizer, epoch, log):
             prec1 = (0,)
         else:
             output = model(input1)
-            #print('out ', output.shape)
-            if args.hand:
-                output = output.view(output.shape[0]*2, -1)
-            loss = criterion(output, target)#, gamma=args.gamma)#, loss_type=args.loss_subtype)
+            loss = criterion(output, target)
             prec1 = accuracy(output.data, target, topk=(1,))
 
         # measure accuracy and record loss
@@ -294,7 +298,7 @@ def train(train_loader, model, criterion, optimizer, epoch, log):
 
 
 
-def validate(val_loader, model, criterion, iter, log):
+def validate(val_loader, model, criterion, iter, log=None):
     batch_time = AverageMeter()
     losses = AverageMeter()
     top1 = AverageMeter()
@@ -311,13 +315,6 @@ def validate(val_loader, model, criterion, iter, log):
                 input1, input2, target = data
             else:
                 input1, target = data
-                if args.hand:
-                    input1 = input1.view(-1, 6, input1.size(2), input1.size(3))
-                    target = target.view(-1)
-
-            #print('input1 ', input1.shape, ' ', target.shape)
-            # exit()
-            # # continue
 
             # compute output
             if args.siamese:
@@ -326,9 +323,7 @@ def validate(val_loader, model, criterion, iter, log):
                 prec1 = (0,)
             else:
                 output = model(input1)
-                if args.hand:
-                    output = output.view(output.shape[0] * 2, -1)
-                loss = criterion(output, target)#, gamma=args.gamma)#, loss_type=args.loss_subtype)
+                loss = criterion(output, target)
                 prec1 = accuracy(output.data, target, topk=(1,))
 
             losses.update(loss.item(), input1.size(0))
@@ -359,10 +354,68 @@ def validate(val_loader, model, criterion, iter, log):
     print(output)
     output_best = '\nBest Prec@1: %.3f'%(best_prec1)
     print(output_best)
-    log.write(output + ' ' + output_best + '\n')
-    log.flush()
+    if log is not None:
+        log.write(output + ' ' + output_best + '\n')
+        log.flush()
 
     return top1.avg, losses.avg
+
+def validate_2stream(val_loader, val_loader_of, model, model_of, criterion, iteration, log=None):
+    batch_time = AverageMeter()
+    top1 = AverageMeter()
+
+    # switch to evaluate mode
+    model.eval()
+    model_of.eval()
+
+    end = time.time()
+    dataiter = iter(val_loader_of)
+    with torch.no_grad():
+        for i, data in enumerate(val_loader):
+            data = [ele.cuda() for ele in data]
+            data_flow = next(dataiter)
+            input1, target = data
+            input1_flow, target_flow = data_flow
+            print(i, ' input ', input1.shape, '\t', input1_flow.shape)
+
+            output = model(input1)
+            output_flow = model_of(input1_flow)
+
+            output = torch.mean(torch.stack((output, output_flow)), axis=0)
+            prec1 = accuracy(output.data, target, topk=(1,))
+
+            top1.update(prec1[0], input1.size(0))
+            #top5.update(prec5[0], input.size(0))
+
+            # measure elapsed time
+            batch_time.update(time.time() - end)
+            end = time.time()
+
+            if i % args.print_freq == 0:
+                output = ('Test: [{0}/{1}]\t'
+                      'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+                      'Prec@1 {top1.val:.3f} ({top1.avg:.3f})\t'.format(
+                       i, len(val_loader), batch_time=batch_time,
+                       top1=top1))
+
+
+                print(output)
+                if log is not None:
+                    log.write(output + '\n')
+                    log.flush()
+
+    output = ('Testing Results: Prec@1 {top1.avg:.3f}'
+          .format(top1=top1))
+    wandb.log({"Test Top1 Accuracy": top1.avg})
+
+    print(output)
+    output_best = '\nBest Prec@1: %.3f'%(best_prec1)
+    print(output_best)
+    if log is not None:
+        log.write(output + ' ' + output_best + '\n')
+        log.flush()
+
+    return top1.avg
 
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):

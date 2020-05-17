@@ -1,3 +1,7 @@
+'''
+Use hand boundbing boxes to train TRN, predict sign label and handshape simultanuously.
+'''
+
 import argparse
 import os
 import time
@@ -9,8 +13,8 @@ import torch.backends.cudnn as cudnn
 import torch.optim
 from torch.nn.utils import clip_grad_norm
 
-from dataset import TSNDataSet
-from models import TSN, ContrastiveLoss
+from dataset_joint import TSNDataSet
+from models import TSN, ContrastiveLoss, HandTSN
 from transforms import *
 from opts import parser
 import datasets_video
@@ -25,22 +29,22 @@ best_loss  = 10
 HAND_CLASS = 85
 
 def initialize_model(num_class, args):
-    model = TSN(num_class, args.num_segments, args.modality,
+    model = HandTSN(num_class, args.num_segments, args.modality,
                 base_model=args.arch,
                 new_length=args.data_length,
                 consensus_type=args.consensus_type,
                 dropout=args.dropout,
                 img_feature_dim=args.img_feature_dim,
                 partial_bn=not args.no_partialbn,
-                siamese=args.siamese,
-                hand=args.hand)
+                siamese=args.siamese
+                )
 
-    crop_size = model.crop_size
-    scale_size = model.scale_size
-    input_mean = model.input_mean
-    input_std = model.input_std
-    policies = model.get_optim_policies()
-    train_augmentation = model.get_augmentation()
+    crop_size = model.model_hand.crop_size
+    scale_size = model.model_hand.scale_size
+    input_mean = model.model_hand.input_mean
+    input_std = model.model_hand.input_std
+    policies = model.model_hand.get_optim_policies()
+    train_augmentation = model.model_hand.get_augmentation()
 
     model = torch.nn.DataParallel(model, device_ids=args.gpus).cuda()
 
@@ -70,16 +74,6 @@ def initialize_dataloader(args, crop_size, scale_size, input_mean,
                               normalize,
                           ]), siamese=args.siamese, hand=args.hand)
 
-    # weighted sampling
-    # class_sample_counts = [1022, 841, 472, 70]
-    # compute weight for all the samples in the dataset
-    # samples_weights contain the probability for each example in dataset to be sampled
-    # class_weights = 1. / torch.Tensor(class_sample_counts)
-    # train_samples_weight = [class_weights[class_id] for class_id in trainset.labels]
-    # train_sampler = torch.utils.data.sampler.WeightedRandomSampler(train_samples_weight, len(trainset))
-    # train_loader = torch.utils.data.DataLoader(trainset, batch_size=args.batch_size, sampler=train_sampler,
-    #                                           num_workers=args.workers, pin_memory=True)
-
     train_loader = torch.utils.data.DataLoader(
         trainset,
         batch_size=args.batch_size, shuffle=True,
@@ -108,17 +102,16 @@ def main():
     global args, best_prec1
     args = parser.parse_args()
     check_rootfolders()
+    args.hand = True
 
     #os.environ['CUDA_VISIBLE_DEVICES'] = "1,2,3"
 
     categories, args.train_list, args.val_list, args.root_path, prefix = datasets_video.return_dataset(args.dataset, args.modality)
     num_class = len(categories)
-    if args.hand:
-        num_class = HAND_CLASS * 2 # the output is (bs, #class*2)
-
 
     args.store_name = '_'.join(['TRN', args.dataset, args.modality, args.arch, args.consensus_type, 'segment%d'% args.num_segments,
-                                'newL%d'% args.data_length, 'loss%s'% args.loss_type, 'bs%d' % args.batch_size])
+                                'newL%d'% args.data_length, 'loss%s'% args.loss_type, 'bs%d' % args.batch_size, 'lambHand%.1f'% args.lamdb_hand,
+                                'lr%f' % args.lr, 'onlyhand'])
     print('storing name: ' + args.store_name)
 
     model,crop_size, scale_size, input_mean, \
@@ -210,13 +203,16 @@ def train(train_loader, model, criterion, optimizer, epoch, log):
     batch_time = AverageMeter()
     data_time = AverageMeter()
     losses = AverageMeter()
+    losses_sign = AverageMeter()
+    losses_hand = AverageMeter()
     top1 = AverageMeter()
+    top1_hand = AverageMeter()
     #top5 = AverageMeter()
 
     if args.no_partialbn:
-        model.module.partialBN(False)
+        model.module.model_hand.partialBN(False)
     else:
-        model.module.partialBN(True)
+        model.module.model_hand.partialBN(True)
 
     # switch to train mode
     model.train()
@@ -225,40 +221,30 @@ def train(train_loader, model, criterion, optimizer, epoch, log):
     for i, data in enumerate(train_loader):
         # measure data loading time
         data = [ele.cuda() for ele in data]
-        if args.siamese:
-            input1, input2, target = data
-        else:
-            input1, target = data # rgb(bs, #seg*3, 224,224), flow(bs, #seg*datalength*2, 224,224), 2 for flow_x&flow_y
-            if args.hand:
-                input1 = input1.view(-1, 6, input1.size(2), input1.size(3)) # each sample is a pair of start&end hand images
-                target = target.view(-1)
 
-        # print('input1 ', input1.shape, ' ', target.shape)
-        # print('target ', target.shape)
-        # break
-        # # continue
+        input, target, input_hand, target_hand = data # rgb(bs, #seg*3, 224,224), flow(bs, #seg*datalength*2, 224,224), 2 for flow_x&flow_y
+        input_hand = input_hand.view(-1, 6, input_hand.size(2), input_hand.size(3)) # each sample is a pair of start&end hand images
+        target_hand = target_hand.view(-1)
 
         data_time.update(time.time() - end)
 
-
         # compute output
-        if args.siamese:
-            output = model(input1, input2)
-            print('output ',output.size(), output)
-            print('target ', target.size())
-            loss = criterion(1-output, target)
-            prec1 = (0,)
-        else:
-            output = model(input1)
-            #print('out ', output.shape)
-            if args.hand:
-                output = output.view(output.shape[0]*2, -1)
-            loss = criterion(output, target)#, gamma=args.gamma)#, loss_type=args.loss_subtype)
-            prec1 = accuracy(output.data, target, topk=(1,))
+        output, output_hand = model(input_hand)
+        output_hand = output_hand.view(output_hand.shape[0]*2, -1)
+
+        loss_sign = criterion(output, target)
+        loss_hand = criterion(output_hand, target_hand)
+        loss = loss_sign + loss_hand * args.lamdb_hand
+
+        prec1 = accuracy(output.data, target, topk=(1,))
+        prec1_hand = accuracy(output_hand.data, target_hand, topk=(1,))
 
         # measure accuracy and record loss
-        losses.update(loss.item(), input1.size(0))
-        top1.update(prec1[0], input1.size(0))
+        losses.update(loss.item(), input.size(0))
+        losses_sign.update(loss_sign.item(), input.size(0))
+        losses_hand.update(loss_hand.item(), input.size(0))
+        top1.update(prec1[0], input.size(0))
+        top1_hand.update(prec1_hand[0], input.size(0))
         #top5.update(prec5[0], input.size(0))
 
 
@@ -282,22 +268,34 @@ def train(train_loader, model, criterion, optimizer, epoch, log):
             output = ('Epoch: [{0}][{1}/{2}], lr: {lr:.5f}\t'
                     'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                     'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
+                    'Loss_sign{loss_sign.val:.4f} ({loss_sign.avg:.4f})\t'
+                    'Loss_hand {loss_hand.val:.4f} ({loss_hand.avg:.4f})\t'
                     'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
+                    'Prechand@1 {top1_hand.val:.3f} ({top1_hand.avg:.3f})\t'
                     'Prec@1 {top1.val:.3f} ({top1.avg:.3f})\t'.format(
                         epoch, i, len(train_loader), batch_time=batch_time,
-                        data_time=data_time, loss=losses, top1=top1, lr=optimizer.param_groups[-1]['lr']))
+                        data_time=data_time, loss=losses, loss_sign=losses_sign,
+                        loss_hand=losses_hand, top1_hand=top1_hand,
+                        top1=top1, lr=optimizer.param_groups[-1]['lr']))
 
             print(output)
 
             log.write(output + '\n')
             log.flush()
 
+    wandb.log({"Train Top1 Accuracy": top1.avg, "Train Loss": losses.avg,
+               "Train hand Top1 Accuracy": top1_hand.avg, "Train hand Loss": losses_hand.avg,
+               "Train sign Loss": losses_sign.avg})
+
 
 
 def validate(val_loader, model, criterion, iter, log):
     batch_time = AverageMeter()
     losses = AverageMeter()
+    losses_sign = AverageMeter()
+    losses_hand = AverageMeter()
     top1 = AverageMeter()
+    top1_hand = AverageMeter()
     #top5 = AverageMeter()
 
     # switch to evaluate mode
@@ -307,32 +305,34 @@ def validate(val_loader, model, criterion, iter, log):
     with torch.no_grad():
         for i, data in enumerate(val_loader):
             data = [ele.cuda() for ele in data]
-            if args.siamese:
-                input1, input2, target = data
-            else:
-                input1, target = data
-                if args.hand:
-                    input1 = input1.view(-1, 6, input1.size(2), input1.size(3))
-                    target = target.view(-1)
+
+            input, target, input_hand, target_hand = data  # rgb(bs, #seg*3, 224,224), flow(bs, #seg*datalength*2, 224,224), 2 for flow_x&flow_y
+            input_hand = input_hand.view(-1, 6, input_hand.size(2),
+                                         input_hand.size(3))  # each sample is a pair of start&end hand images
+            target_hand = target_hand.view(-1)
 
             #print('input1 ', input1.shape, ' ', target.shape)
             # exit()
             # # continue
 
             # compute output
-            if args.siamese:
-                output1, output2 = model(input1, input2)
-                loss = criterion(output1, output2, target)
-                prec1 = (0,)
-            else:
-                output = model(input1)
-                if args.hand:
-                    output = output.view(output.shape[0] * 2, -1)
-                loss = criterion(output, target)#, gamma=args.gamma)#, loss_type=args.loss_subtype)
-                prec1 = accuracy(output.data, target, topk=(1,))
+            output, output_hand = model(input_hand)
+            # print('out ', output.shape)
 
-            losses.update(loss.item(), input1.size(0))
-            top1.update(prec1[0], input1.size(0))
+            output_hand = output_hand.view(output_hand.shape[0] * 2, -1)
+            loss_sign = criterion(output, target)
+            loss_hand = criterion(output_hand, target_hand)
+            loss = loss_sign + loss_hand * args.lamdb_hand
+
+            prec1 = accuracy(output.data, target, topk=(1,))
+            prec1_hand = accuracy(output_hand.data, target_hand, topk=(1,))
+
+
+            losses.update(loss.item(), input.size(0))
+            losses_sign.update(loss_sign.item(), input.size(0))
+            losses_hand.update(loss_hand.item(), input.size(0))
+            top1.update(prec1[0], input.size(0))
+            top1_hand.update(prec1_hand[0], input.size(0))
             #top5.update(prec5[0], input.size(0))
 
             # measure elapsed time
@@ -341,20 +341,29 @@ def validate(val_loader, model, criterion, iter, log):
 
             if i % args.print_freq == 0:
                 output = ('Test: [{0}/{1}]\t'
-                      'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
-                      'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
-                      'Prec@1 {top1.val:.3f} ({top1.avg:.3f})\t'.format(
-                       i, len(val_loader), batch_time=batch_time, loss=losses,
-                       top1=top1))
+                        'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+                        'Loss_sign{loss_sign.val:.4f} ({loss_sign.avg:.4f})\t'
+                        'Loss_hand {loss_hand.val:.4f} ({loss_hand.avg:.4f})\t'
+                        'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
+                        'Prechand@1 {top1_hand.val:.3f} ({top1_hand.avg:.3f})\t'
+                        'Prec@1 {top1.val:.3f} ({top1.avg:.3f})\t'.format(
+                       i, len(val_loader), batch_time=batch_time, loss=losses, loss_sign=losses_sign,
+                        loss_hand=losses_hand, top1_hand=top1_hand,
+                        top1=top1))
 
 
                 print(output)
                 log.write(output + '\n')
                 log.flush()
 
-    output = ('Testing Results: Prec@1 {top1.avg:.3f} Loss {loss.avg:.5f}'
-          .format(top1=top1, loss=losses))
-    wandb.log({"Test Top1 Accuracy": top1.avg, "Test Loss": losses.avg})
+    output = ('Testing Results: Prec@1 {top1.avg:.3f} Prechand@1 {top1_hand.avg:.3f} '
+              'Loss {loss.avg:.5f} '
+              'Loss_hand {loss_hand.avg:.5f} '
+              'Loss_sign {loss_sign.avg:.5f} '
+          .format(top1=top1, top1_hand=top1_hand,loss=losses, loss_sign=losses_sign, loss_hand=losses_hand))
+    wandb.log({"Test Top1 Accuracy": top1.avg, "Test Loss": losses.avg,
+               "Test hand Top1 Accuracy": top1_hand.avg, "Test hand Loss": losses_hand.avg,
+               "Test sign Loss": losses_sign.avg})
 
     print(output)
     output_best = '\nBest Prec@1: %.3f'%(best_prec1)

@@ -39,7 +39,6 @@ python GenerateClassificationFolders.py
 ```
 python process_dataset_dai.py
 ```
-8. Add function `return_dai` in dataset_video.py
 
 #### Optical flow image
 To compute optical flow image of each frame, run `python extract_of.py`

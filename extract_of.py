@@ -13,7 +13,7 @@ import random
 
 
 def get_existed_utt():
-    flow_base_fold = base_fold + "opticalflow_new/"
+    flow_base_fold = base_fold + "utt_frame_of/"
     utt_list = os.listdir(flow_base_fold)
     valid_num = 0
     invalid_num = 0
@@ -78,10 +78,10 @@ def dense_flow(u_id):
     with counter.get_lock():
         counter.value += 1
 
-    #print("{} of {}".format(counter.value, len(u_id_list)))
+    print("{} of {}".format(counter.value, len(u_id_list)))
 
     src_dir = frame_fold + "{}/".format(u_id)
-    res_dir = base_fold + "opticalflow_new/{}/".format(u_id)
+    res_dir = base_fold + "utt_frame_of/{}/".format(u_id)
     os.mkdir(res_dir)
     #u_id, save_dir,step,bound=augs
 
@@ -128,7 +128,7 @@ if __name__ =='__main__':
     print(len(u_id_list))
     u_id_list = [utt for utt in u_id_list if utt not in existed_utt]
     print("there are {} utterances need to do".format(len(u_id_list)))
-    dense_flow(u_id_list[0])
+    #dense_flow(u_id_list[0])
     #'''
     counter = Value('i', 0)
     p = Pool(16, initargs=(counter,))
